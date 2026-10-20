@@ -159,6 +159,8 @@ Standard GTFS static feed — `stops.txt`, `routes.txt`, `trips.txt`, `stop_time
 
 ## Status
 
+Full plan, phase by phase, in [ROADMAP.md](ROADMAP.md). Summary:
+
 ### Done — raw collection
 - [x] Real-time rail predictions, appended with `snapshot_ts`
 - [x] Rail incidents, appended with `snapshot_ts`
