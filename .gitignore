@@ -8,5 +8,6 @@ data/raw/*.csv
 data/raw/*.zip
 data/processed/*.csv
 data/processed/*.parquet
+data/raw/gtfs_rt/
 
 logs/
