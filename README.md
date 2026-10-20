@@ -26,13 +26,15 @@ snapshots. That is why collection runs on a schedule and appends to the raw file
 │   ├── collect_incidents.py  # rail incidents / alerts      -> data/raw/wmata_incidents.csv
 │   ├── collect_weather.py    # current weather (Open-Meteo) -> data/raw/weather.csv
 │   └── collect_gtfs.py       # static GTFS schedule feed    -> data/raw/wmata_gtfs.zip
-└── data/
-    ├── raw/                  # append-only snapshots (git-ignored)
-    └── processed/            # derived tables (git-ignored)
+├── data/
+│   ├── raw/                  # append-only snapshots (contents git-ignored)
+│   └── processed/            # derived tables (contents git-ignored)
+└── requirements.txt
 ```
 
-Everything under `data/` is git-ignored. Raw data is not committed; collaborators
-regenerate it by running the collectors.
+The *contents* of `data/` are git-ignored — the directories themselves are kept in the
+repo via `.gitkeep` so the collectors have somewhere to write on a fresh clone. Raw data
+is not committed; collaborators regenerate it by running the collectors.
 
 ## Setup
 
@@ -46,14 +48,7 @@ cd 602DS
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-pip install requests pandas python-dotenv
-```
-
-Create the data directories — the collectors do **not** create them, and will fail with
-`FileNotFoundError` if they are missing:
-
-```bash
-mkdir -p data/raw data/processed
+pip install -r requirements.txt
 ```
 
 Create a `.env` file in the repository root:
@@ -195,10 +190,7 @@ Standard GTFS static feed — `stops.txt`, `routes.txt`, `trips.txt`, `stop_time
       per the pilot plan in the proposal.
 
 ### Known gaps in the current code
-- No `requirements.txt` / `environment.yml` — dependencies are documented here only.
 - No `.env.example`.
-- `data/raw/` and `data/processed/` are not created automatically and are not tracked, so
-  a fresh clone fails until the directories are made by hand.
 - No retry or backoff. A single failed request raises and aborts the whole run,
   including the collectors that would have succeeded after it.
 - No deduplication. Re-running within the same prediction cycle appends near-duplicate
