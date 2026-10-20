@@ -85,21 +85,41 @@ from the dataset. This is the single highest-priority item in the project.
       scheduler, so failures would currently be silent
 - [ ] Record failed runs so gaps in the time series are explainable later
 
-### 1.3 Evaluate the `TrainPositions` endpoint — time-sensitive
+### 1.3 Evaluate richer real-time sources — time-sensitive, high value
 `GetPrediction` returns no train identifier, which is what makes arrival reconstruction
-(Phase 2) hard and approximate. WMATA publishes a separate real-time endpoint,
-`TrainPositions`, which is documented as including a train ID, track circuit ID,
-line, direction, destination, and seconds-at-location.
+(Phase 2) hard and approximate. There are two better options, and **both must be
+evaluated before collection starts**, because neither can be backfilled.
 
-- [ ] Verify the endpoint, its fields, and its rate cost against your API key
-- [ ] If it carries a stable train ID, add a collector for it **now** — tracking a train
-      by ID is far more reliable than inferring identity from a countdown, and it would
-      substantially de-risk Phase 2
-- [ ] If adopted, treat it as a supplement, not a replacement: predictions remain the
-      station-level source, positions become the identity source
+**a. GTFS-Realtime rail feeds.** The Mobility Database catalog lists three rail GTFS-RT
+feeds alongside the static one:
 
-This is listed in Phase 1 rather than Phase 2 on purpose. Reconstruction can be written
-later; the data to support it can only be captured in real time.
+| Feed | URL |
+|---|---|
+| Trip updates | `https://api.wmata.com/gtfs/rail-gtfsrt-tripupdates.pb` |
+| Vehicle positions | `https://api.wmata.com/gtfs/rail-gtfsrt-vehiclepositions.pb` |
+| Alerts | `https://api.wmata.com/gtfs/rail-gtfsrt-alerts.pb` |
+
+This could **collapse most of Phase 2**. GTFS-RT `TripUpdates` are keyed by `trip_id`,
+which joins directly to `stop_times.txt` — meaning observed and scheduled arrival come
+from the same identifier and scheduled headway needs no inference at all. Supporting
+evidence: `trips.txt` already carries `train_id` and `scheduled_trip_id` columns, so WMATA
+is clearly tracking individual trains through the schedule.
+
+- [ ] Fetch each feed and inspect it (needs `gtfs-realtime-bindings` + `protobuf`)
+- [ ] Check whether `TripUpdates` carries actual arrival times or only predictions
+- [ ] Confirm `trip_id` values match the static feed's
+- [ ] **If this works, prefer it over countdown reconstruction** and rewrite Phase 2
+      around it — reserve the prediction board as a fallback and cross-check
+
+**b. The `TrainPositions` REST endpoint** — documented as including a train ID, track
+circuit ID, line, direction, destination, and seconds-at-location.
+
+- [ ] Run `python src/check_train_positions.py` once the key arrives
+- [ ] If it carries a stable train ID, add a collector — useful for identity even if
+      GTFS-RT covers arrivals
+
+Collect whatever proves useful from day one, even before the processing code exists.
+Reconstruction can be written later; the data to feed it only exists in real time.
 
 ### 1.4 Storage
 - [ ] Estimate growth: `GetPrediction/All` returns on the order of several hundred rows
@@ -170,10 +190,17 @@ its `Min` counts down, and detect the moment it arrives.
 
 Produces the scheduled baseline that observed service is measured against.
 
-- [ ] Unzip and load `stops.txt`, `routes.txt`, `trips.txt`, `stop_times.txt`,
-      `calendar.txt`, `calendar_dates.txt`
-- [ ] Resolve the service calendar: which `service_id`s run on a given date, including
-      `calendar_dates.txt` exceptions (holidays)
+> **Feed structure confirmed** against a mirrored copy of the rail feed
+> (`reference/gtfs_notes.md`). Three things differ from the standard assumptions:
+> there is **no `calendar.txt`** — only `calendar_dates.txt`, listing every service date
+> explicitly; `departure_time` values **exceed 24:00:00** (observed up to `26:12:00`);
+> and `route_id` is `RED`/`BLUE`/… while the prediction API uses `RD`/`BL`/….
+
+- [x] Unzip and load `stops.txt`, `routes.txt`, `trips.txt`, `stop_times.txt`,
+      `calendar_dates.txt`
+- [ ] Resolve the service calendar. Simpler than expected: with no `calendar.txt`, there
+      are no weekly patterns to expand — map `service_id` to date directly from
+      `calendar_dates.txt`
 - [ ] Handle GTFS times past midnight — `25:14:00` is valid GTFS meaning 01:14 on the
       following day, and naive parsing will throw or silently mangle late-night service
 - [ ] Build scheduled arrivals per stop / route / direction / service date
@@ -191,28 +218,47 @@ Produces the scheduled baseline that observed service is measured against.
 
 The four sources do not share identifiers. Nothing joins until this exists.
 
-- [ ] **Station:** WMATA `LocationCode` (e.g. `A01`) ↔ GTFS `stop_id`. Rail GTFS
-      typically has platform-level stops with a `parent_station`; decide which level is
-      the join target
-- [ ] **Direction:** WMATA `Group` (`1`/`2`) ↔ GTFS `direction_id` (`0`/`1`). **Do not
-      assume these align.** Validate empirically per line — a silent mismatch here
-      reverses direction for an entire line and quietly invalidates every headway
-      computed from it
-- [ ] **Line:** WMATA line code (`RD`, `BL`, `YL`, `OR`, `GR`, `SV`) ↔ GTFS `route_id`
-- [ ] Handle shared-track stations where multiple lines serve one platform
-- [ ] **Validate coverage:** assert every station code appearing in the predictions maps
-      to exactly one GTFS stop, and fail loudly on unmapped codes
-- [ ] Store as a versioned reference file (e.g. `reference/station_crosswalk.csv`)
-      committed to the repo — it is small, stable, and hand-verified, so it belongs in
-      git rather than being regenerated
+**Mostly solved** — `src/build_crosswalk.py` generates
+`reference/station_crosswalk.csv` (125 rows) with validation that fails loudly rather
+than dropping stops. Rebuild it whenever the GTFS feed is refreshed.
+
+- [x] **Station.** `stop_times.txt` references *platform* ids, not station ids, and
+      platforms encode the code cleanly as `PF_<LocationCode>_<1|2|C>`. Platforms are
+      therefore the join target. This matters: station-level ids **combine** codes at the
+      four transfer stations (`STN_A01_C01`, `STN_B01_F01`, `STN_D03_F03`, `STN_B06_E06`),
+      so joining at station level would silently drop Metro Center, Gallery Place,
+      L'Enfant Plaza and Fort Totten — four of the busiest in the system
+- [x] **Line.** `RD`→`RED`, `BL`→`BLUE`, `GR`→`GREEN`, `YL`→`YELLOW`, `OR`→`ORANGE`,
+      `SV`→`SILVER`, with the lines serving each platform derived from the schedule
+      rather than assumed
+- [x] **Shared platforms** handled — `lines_wmata` is multi-valued where several lines
+      serve one platform (e.g. `PF_C01_C` → `BL;OR;SV`)
+- [x] **Coverage validated** — every stop referenced by `stop_times.txt` resolves, no
+      duplicate platform ids, no missing coordinates. 125 platforms / 102 location
+      codes / 98 stations, matching WMATA's published counts
+- [ ] **Direction — STILL OPEN, needs live data.** Platform suffix `1`/`2` is named
+      "TRACK 1/2 PLATFORM" and very likely equals WMATA's `Group`, but this is a
+      hypothesis, not a verified fact. **Validate against real predictions before
+      trusting any headway** — a silent mismatch reverses direction for a whole line.
+      Note that 79 of 102 codes have only a *center* platform serving both directions,
+      so for those, direction must come from `direction_id`/destination, not the platform
+- [ ] Re-run against the live feed once the API key arrives (see *Known limitation* below)
 
 ### 4.1 Station attributes (enables the "differs by station/line" analysis)
-- [ ] Pull station coordinates from GTFS `stops.txt`
+- [x] Station coordinates — in the crosswalk as `stop_lat`/`stop_lon`
 - [ ] **Flag above-ground vs. underground segments.** This is likely the strongest
       predictor of weather sensitivity in the entire project: underground platforms are
       insulated from rain, snow, and heat, while above-ground track and rolling stock are
       not. Derive from WMATA station data or code manually — there are only 98 stations
-- [ ] Note terminals, transfer stations, and single-track-prone segments
+- [x] Transfer stations flagged (`is_transfer_station`)
+- [ ] Note terminals and single-track-prone segments
+
+### Known limitation of the current crosswalk
+It was built from a **mirrored GTFS snapshot dated 2024-10-01**, pulled from the
+Mobility Database because the live feed needs an API key we did not have yet. The
+*structure* is what matters here and is unlikely to have changed, but station codes,
+platforms and schedules may have. **Re-run `src/build_crosswalk.py` against the live
+feed as soon as the key arrives**, and diff the output before relying on it.
 
 ---
 
