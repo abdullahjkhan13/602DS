@@ -1,3 +1,11 @@
 requests>=2.32.3
 pandas>=2.2.3
 python-dotenv>=1.1.0
+
+# Reading the GTFS-Realtime .pb feeds. Not needed to collect them (they are stored raw),
+# only to decode them during processing.
+gtfs-realtime-bindings>=1.0.0
+protobuf>=4.25.0
+
+# Parquet output for the processed layer.
+pyarrow>=15.0.0

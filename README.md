@@ -21,23 +21,66 @@ snapshots. That is why collection runs on a schedule and appends to the raw file
 ```
 602DS/
 ├── src/
-│   ├── main.py               # runs all four collectors once
-│   ├── common.py             # shared config, logging, retry, CSV append
-│   ├── collect_wmata.py      # real-time train predictions  -> wmata_predictions_<date>.csv
-│   ├── collect_incidents.py  # rail incidents / alerts      -> wmata_incidents_<date>.csv
-│   ├── collect_weather.py    # current weather (Open-Meteo) -> weather_<date>.csv
-│   ├── collect_gtfs.py       # static GTFS schedule feed    -> wmata_gtfs_<date>.zip
-│   └── check_train_positions.py   # one-off API probe (see ROADMAP Phase 1.3)
+│   ├── main.py                 # runs every collector once
+│   ├── common.py               # shared config, logging, retry, CSV append
+│   ├── verify_access.py        # probe all endpoints — run this first with a new key
+│   ├── collect_wmata.py        # rail predictions      -> wmata_predictions_<date>.csv
+│   ├── collect_train_positions.py  # train positions   -> train_positions_<date>.csv
+│   ├── collect_gtfs_rt.py      # GTFS-RT feeds         -> gtfs_rt/<feed>/<date>/*.pb.gz
+│   ├── collect_incidents.py    # rail incidents        -> wmata_incidents_<date>.csv
+│   ├── collect_weather.py      # weather (Open-Meteo)  -> weather_<date>.csv
+│   ├── collect_gtfs.py         # static GTFS feed      -> wmata_gtfs_<date>.zip
+│   ├── build_crosswalk.py      # GTFS -> reference/station_crosswalk.csv
+│   └── check_train_positions.py    # one-off field inspection
+├── reference/                # hand-verified lookup tables (committed)
+│   ├── station_crosswalk.csv # WMATA LocationCode <-> GTFS platform
+│   └── gtfs_notes.md         # feed structure findings
 ├── data/
 │   ├── raw/                  # append-only snapshots (contents git-ignored)
 │   └── processed/            # derived tables (contents git-ignored)
 ├── logs/                     # collector logs (git-ignored, created on first run)
+├── setup_scheduler.ps1       # register/remove the Windows scheduled tasks
 └── requirements.txt
 ```
 
 The *contents* of `data/` are git-ignored — the directories themselves are kept in the
 repo via `.gitkeep` so the collectors have somewhere to write on a fresh clone. Raw data
 is not committed; collaborators regenerate it by running the collectors.
+
+## When the API key arrives
+
+Everything below is already in place, so starting collection is four commands. Do this
+promptly — real-time data cannot be backfilled, and every hour unscheduled is an hour
+permanently missing.
+
+```powershell
+# 1. one-time environment setup (can be done before the key arrives)
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# 2. paste the key
+copy .env.example .env     # then edit .env and fill in WMATA_API_KEY
+
+# 3. confirm the key reaches every product we need
+python src\verify_access.py
+
+# 4. start collecting
+.\setup_scheduler.ps1
+```
+
+`verify_access.py` prints one line per endpoint. Anything marked `NO ACCESS` means that
+product is missing from your key's subscription — fix it at
+https://developer.wmata.com/ before step 4, since the gap cannot be filled in later.
+
+Then, once collecting, rebuild the crosswalk against the live feed (the committed one was
+built from a 2024 mirror — see [ROADMAP.md](ROADMAP.md) Phase 4):
+
+```powershell
+python src\collect_gtfs.py
+python src\build_crosswalk.py
+git diff reference\station_crosswalk.csv
+```
 
 ## Setup
 
@@ -64,7 +107,7 @@ WMATA_API_KEY=your_key_here
 
 ## Usage
 
-Run all four collectors once:
+Run every collector once:
 
 ```bash
 python src/main.py
@@ -173,7 +216,9 @@ Full plan, phase by phase, in [ROADMAP.md](ROADMAP.md). Summary:
 - [x] Rail incidents, appended with `snapshot_ts`
 - [x] Current weather from Open-Meteo, appended with `snapshot_ts`
 - [x] Static GTFS feed download
-- [x] Single entry point (`src/main.py`) running all four
+- [x] Single entry point (`src/main.py`) running all six, with failure isolation
+- [x] Reliability: retries, rotating logs, daily-partitioned files, scheduler script
+- [x] Crosswalk built and validated (`reference/station_crosswalk.csv`)
 
 ### Next — processing and analysis
 - [ ] **Scheduling.** Automate `src/main.py` so snapshots accumulate; nothing useful can
@@ -213,29 +258,31 @@ Each source is scheduled separately, because they need different cadences:
 | Collector | Cadence | Why |
 |---|---|---|
 | `collect_wmata.py` | 1 min | Arrival reconstruction needs to see `Min` count down |
+| `collect_gtfs_rt.py` | 1 min | Trip updates are the likely primary arrival source |
+| `collect_train_positions.py` | 1 min | Train identity between snapshots |
 | `collect_incidents.py` | 5 min | Incidents last minutes to hours |
 | `collect_weather.py` | 15 min | Open-Meteo refreshes about this often |
 | `collect_gtfs.py` | weekly | Static schedule changes rarely |
 
-At these rates the WMATA calls total roughly 1,700/day, well inside the free tier's
-50,000/day.
+At these rates the WMATA calls total roughly 7,500/day, inside the free tier's
+50,000/day with room to spare.
 
-### Windows (Task Scheduler)
+Three real-time sources run at once deliberately: it is not yet settled which gives the
+most reliable arrival times (see [ROADMAP.md](ROADMAP.md) Phase 1.3), and that question
+can only be answered with real data. Collecting all three costs little; choosing wrong
+and finding out in December costs the project.
 
-Use a virtual environment rather than a Microsoft Store Python — the
-`WindowsApps` interpreter aliases are unreliable when launched by Task Scheduler.
-Point the tasks at `.venv\Scripts\pythonw.exe` (not `python.exe`), which runs without
-opening a console window every minute.
+### Windows
 
 ```powershell
-$py   = "$PWD\.venv\Scripts\pythonw.exe"
-$src  = "$PWD\src"
-
-schtasks /create /tn "WMATA Predictions" /tr "`"$py`" `"$src\collect_wmata.py`""    /sc minute /mo 1  /f
-schtasks /create /tn "WMATA Incidents"   /tr "`"$py`" `"$src\collect_incidents.py`"" /sc minute /mo 5  /f
-schtasks /create /tn "WMATA Weather"     /tr "`"$py`" `"$src\collect_weather.py`""   /sc minute /mo 15 /f
-schtasks /create /tn "WMATA GTFS"        /tr "`"$py`" `"$src\collect_gtfs.py`""      /sc weekly        /f
+.\setup_scheduler.ps1            # register all tasks
+.\setup_scheduler.ps1 -Remove    # unregister them
 ```
+
+The script refuses to run without a `.venv` and a `.env`, so it cannot silently register
+tasks that would fail every minute. It uses `.venv\Scripts\pythonw.exe` rather than a
+Microsoft Store Python — the `WindowsApps` interpreter aliases are unreliable under Task
+Scheduler — and `pythonw` avoids a console window popping up every minute.
 
 Task Scheduler skips a run if the previous one is still going, so overlapping appends
 cannot corrupt a file. It does **not** catch up on runs missed while the machine is

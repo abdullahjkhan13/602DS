@@ -15,6 +15,39 @@ analysis of how weather affects service, broken out by line, time of day, and st
 
 ---
 
+## Where we are right now
+
+*Last updated 2026-10-20.*
+
+**Blocked on one thing: the WMATA API key.** Everything that can be built without it has
+been. When the key arrives, collection starts in four commands (see the README) — no code
+needs writing first.
+
+| Phase | State |
+|---|---|
+| 0 — Collection code | Done, six collectors |
+| 1 — Reliability, scheduling, storage | Done and scripted; **waiting on key to run** |
+| 2 — Arrival reconstruction | Not started; approach may change — see 1.3 |
+| 3 — GTFS schedule parsing | Feed structure mapped; parsing not written |
+| 4 — Crosswalk | Built and validated; needs re-run on the live feed |
+| 5–11 | Not started |
+
+**Three findings so far that changed the plan:**
+
+1. **WMATA publishes GTFS-Realtime rail feeds** (Phase 1.3). If `TripUpdates` carries
+   real arrival times keyed by `trip_id`, most of Phase 2 collapses — observed and
+   scheduled arrivals would share an identifier instead of being matched by inference.
+   Collectors are written and will run from day one; the decision gets made on real data.
+2. **The crosswalk had a silent-failure trap** (Phase 4). Joining at GTFS *station* level
+   would have dropped Metro Center, Gallery Place, L'Enfant Plaza and Fort Totten without
+   error. Joining at platform level avoids it. Solved and validated.
+3. **The collection window almost certainly contains no testable snow** (Phase 9). Seven
+   years of history give a median of 4 snow hours in this calendar window. Rain, wind and
+   freezing temperatures are all well-powered; snow is not. **This affects the research
+   question as written** and should be discussed as a group.
+
+---
+
 ## Phase 0 — Raw data collection (DONE)
 
 - [x] Real-time rail prediction collector (`src/collect_wmata.py`), appending with a
@@ -22,14 +55,19 @@ analysis of how weather affects service, broken out by line, time of day, and st
 - [x] Rail incident collector (`src/collect_incidents.py`), appending with `snapshot_ts`
 - [x] Current weather collector (`src/collect_weather.py`), Open-Meteo, Metro Center
       coordinates, appending with `snapshot_ts`
-- [x] Static GTFS rail feed download (`src/collect_gtfs.py`)
-- [x] Single entry point running all four (`src/main.py`)
-- [x] API key handling via git-ignored `.env`
+- [x] Static GTFS rail feed download (`src/collect_gtfs.py`), dated per download
+- [x] GTFS-Realtime collector (`src/collect_gtfs_rt.py`) — trip updates, vehicle
+      positions and alerts, stored as gzipped raw protobuf
+- [x] Train position collector (`src/collect_train_positions.py`)
+- [x] Single entry point running all six (`src/main.py`), with per-collector failure
+      isolation
+- [x] API key handling via git-ignored `.env`, with a committed `.env.example`
 - [x] Repo hygiene: `requirements.txt`, tracked `data/raw/` and `data/processed/`
       directories, documented schemas in the README
 
-**What this means:** acquisition works end to end. Every remaining phase is either
-*keeping it running* or *turning snapshots into the unit of analysis.*
+**What this means:** acquisition is written and tested for every source we might use.
+Every remaining phase is either *keeping it running* or *turning snapshots into the unit
+of analysis.*
 
 ---
 
@@ -38,16 +76,27 @@ analysis of how weather affects service, broken out by line, time of day, and st
 These block or shape the work downstream. Resolve them as a group, then record the
 answers in this file.
 
+**Still open:**
+
 - [ ] **Collection end date** — when does data collection stop so analysis can start?
       Everything downstream is sized by this.
-- [ ] **Snapshot cadence** for predictions (recommend 60s; see Phase 1).
 - [ ] **24/7 or service hours only?** Metrorail runs roughly 05:00–00:00. Overnight
       collection produces almost no arrivals but keeps the pipeline simple.
-- [ ] **Add a `TrainPositions` collector?** See Phase 1.3 — this decision cannot be
-      deferred, because missed collection cannot be backfilled.
-- [ ] **Storage format** — plain appended CSV, daily-partitioned CSV, or Parquet
-      (see Phase 1.4).
+- [ ] **Which machine hosts collection?** A laptop on a scheduler stops when it sleeps;
+      an always-on machine is far safer. This gates starting collection.
+- [ ] **Does the research question still lead with snow?** The climatology says it
+      cannot be answered in this window (see *Where we are right now*). Reframing around
+      rain, wind and freezing temperatures is the realistic option.
 - [ ] **Owner for each phase below.**
+
+**Resolved:**
+
+- [x] **Snapshot cadence** — 60s for the three real-time sources, 5 min incidents,
+      15 min weather, weekly GTFS. Encoded in `setup_scheduler.ps1`.
+- [x] **Collect `TrainPositions` and GTFS-RT?** Yes, both, from day one. Neither can be
+      backfilled, and Phase 1.3 cannot be settled without real data.
+- [x] **Storage format** — daily-partitioned CSV for tabular sources, gzipped raw
+      protobuf for GTFS-RT, Parquet for the processed layer.
 
 ---
 
@@ -58,14 +107,17 @@ after the fact: every hour the scheduler is not running is an hour permanently m
 from the dataset. This is the single highest-priority item in the project.
 
 ### 1.1 Scheduling
-- [ ] Choose a mechanism: `cron` (macOS/Linux), Task Scheduler (Windows), or a GitHub
-      Actions scheduled workflow
-- [ ] Decide cadence per source and split `main.py` accordingly — they do not all need
-      the same frequency:
-      - predictions: every 60s (required for countdown reconstruction, Phase 2)
+- [x] Mechanism chosen and scripted — `setup_scheduler.ps1` registers every collector as
+      a Windows scheduled task, and refuses to run without a `.venv` and `.env`
+- [x] Collectors written for all candidate sources, so collection can start the moment a
+      key exists: predictions, GTFS-RT, train positions, incidents, weather, GTFS static
+- [x] `src/verify_access.py` — probes every endpoint and reports which the key can reach
+- [ ] **Run it.** Blocked only on the API key
+- [x] Cadence per source, encoded in `setup_scheduler.ps1`:
+      - predictions, GTFS-RT, train positions: every 60s
       - incidents: every 5 min
       - weather: every 15 min (Open-Meteo refreshes roughly this often; faster is waste)
-      - GTFS: weekly, or whenever WMATA publishes a new feed
+      - GTFS static: weekly
 - [ ] Confirm it survives sleep/reboot on whichever machine hosts it
 - [ ] Verify the WMATA rate budget: the free tier is limited (commonly 10 calls/sec and
       50,000/day). At 60s cadence, predictions cost ~1,440 calls/day — comfortably
@@ -76,14 +128,13 @@ from the dataset. This is the single highest-priority item in the project.
 > delayed under load, which adds jitter to `snapshot_ts`. A always-on machine is the
 > safest if anyone has one.
 
-### 1.2 Robustness
-- [ ] Wrap each collector call in `main.py` so one failure does not abort the others —
-      right now an exception in `collect_wmata` prevents weather and incidents from
-      running at all
-- [ ] Add retry with backoff on transient HTTP failures (timeouts, 5xx, 429)
-- [ ] Replace `print` with `logging` to a rotating file — stdout is lost under a
-      scheduler, so failures would currently be silent
-- [ ] Record failed runs so gaps in the time series are explainable later
+### 1.2 Robustness (DONE)
+- [x] Per-collector failure isolation in `main.py` — one source failing no longer stops
+      the rest
+- [x] Retry with backoff on transient HTTP failures, skipping retries on 401/403/404
+      where retrying is pointless
+- [x] Rotating file logging to `logs/` — stdout is lost under a scheduler
+- [x] Failures logged with tracebacks, so gaps in the series are explainable later
 
 ### 1.3 Evaluate richer real-time sources — time-sensitive, high value
 `GetPrediction` returns no train identifier, which is what makes arrival reconstruction
@@ -122,14 +173,18 @@ Collect whatever proves useful from day one, even before the processing code exi
 Reconstruction can be written later; the data to feed it only exists in real time.
 
 ### 1.4 Storage
-- [ ] Estimate growth: `GetPrediction/All` returns on the order of several hundred rows
-      per call. At 60s cadence this is roughly 400k–600k rows/day, i.e. tens to hundreds
-      of MB of CSV per day. Measure your actual rate after a day of collection.
-- [ ] Decide on partitioning — one file per day (`wmata_predictions_2026-10-21.csv`)
-      rather than one unbounded file, so nothing has to be fully re-read to inspect a
-      single day
-- [ ] Consider Parquet for the processed layer (smaller, typed, much faster to load)
-- [ ] Confirm the repo stays clean — raw data must not be committed
+- [x] Daily partitioning — every CSV collector writes `<name>_<YYYY-MM-DD>.csv`, and the
+      GTFS-RT collector writes under `gtfs_rt/<feed>/<date>/`
+- [x] GTFS-RT stored as gzipped raw protobuf: decoding is a schema assumption, and a
+      wrong one loses data permanently, while raw bytes can be re-parsed any number of
+      times
+- [x] Raw data stays out of git
+- [ ] **Measure actual growth after day one.** `GetPrediction/All` returns several
+      hundred rows per call, so expect 400k–600k rows/day from predictions alone, plus
+      the RT feeds. If it is heavier than expected, drop RT cadence or prune whichever
+      real-time source Phase 1.3 rules out
+- [ ] Exclude `data/` from OneDrive sync — per-minute appends in a synced folder cause
+      sync churn and can lock files mid-write
 
 > This directory is inside OneDrive. Continuous appends to large files in a synced folder
 > can cause sync churn or file locking. Check whether `data/` should be excluded from
@@ -272,10 +327,14 @@ feed as soon as the key arrives**, and diff the output before relying on it.
       several points across the service area (e.g. one per line, or per outlying
       terminal); or interpolate per station. More points cost nothing in API terms but
       add pipeline complexity
-- [ ] **Evaluate the Open-Meteo historical/archive API as a backfill.** Unlike the
-      transit data, weather *can* be recovered retroactively, and an archive pull would
-      give hourly history for any coordinates. This substantially de-risks weather
-      coverage and may make per-station weather cheap
+- [x] **Open-Meteo archive API confirmed working** (`archive-api.open-meteo.com/v1/archive`,
+      free, no key). Hourly history for arbitrary coordinates and dates.
+      **Weather is therefore a solved problem and off the risk list:** gaps in
+      `collect_weather.py` do not matter, and per-station weather costs nothing but
+      pipeline code. The live collector is kept as ground truth and because the archive
+      lags by a few days
+- [ ] Decide whether to use archive data as the primary weather source and demote the
+      live collector to a cross-check
 - [ ] **Join to arrival events** by nearest timestamp — a backward as-of join with an
       explicit tolerance (e.g. 30 min), so an arrival never silently inherits weather
       from hours away
@@ -357,11 +416,24 @@ the worst outcome available.
 - [ ] Missingness and outlier profile across all sources
 - [ ] Distribution of headway deviation overall, by line, by station, by hour
 - [ ] Baseline service patterns in *good* weather — the comparison point for everything
-- [ ] **Weather coverage audit — do this early.** Check what conditions the collection
-      window actually contains. If the period includes no snow, the snow hypothesis is
-      untestable no matter how good the pipeline is, and the research question must lean
-      on rain, wind, and temperature instead. Find this out now, not while writing the
-      report
+- [x] **Weather coverage audit — DONE, and it constrains the research question.**
+      Open-Meteo archive data for Metro Center, 20 Oct – 15 Dec, 2019–2025:
+
+      | Condition | median hours | range |
+      |---|---|---|
+      | Rain | 121 | 100–218 |
+      | Heavy rain (≥2.5 mm/h) | 18 | 14–52 |
+      | **Snow** | **4** | **2–19** |
+      | Freezing (≤0 °C) | 84 | 53–189 |
+      | Gusts ≥40 km/h | 147 | 92–214 |
+
+      Out of 1,368 hours. **Snow is not testable in this window** — a median of 4 hours
+      cannot support any claim, and the proposal names snow first among the conditions
+      investigated. Rain, wind and freezing temperatures are all well-powered. Reframe
+      the question around those three, and state the snow limitation explicitly in the
+      report rather than reporting a null result as if it were a finding.
+- [ ] Re-run the same audit against the *actual* collection window once it closes, since
+      a single season can deviate from the climatology in either direction
 - [ ] Incident frequency and overlap with weather events
 - [ ] Visualizations for the report
 
@@ -413,18 +485,20 @@ the long pole and should start as soon as a few days of snapshots exist to test 
 
 | Order | Work | Depends on | Notes |
 |---|---|---|---|
-| 1 | Phase 1 — scheduling and reliability | — | Start today; every hour costs data |
-| 2 | Phases 3 + 4 — GTFS and crosswalk | GTFS zip only | Parallel with collection |
-| 3 | Phase 2 — arrival reconstruction | A few days of snapshots | Longest and riskiest |
-| 4 | Phases 5 + 6 — weather and incidents | Phase 2 output | Parallelizable |
-| 5 | Phase 7 — analytical dataset | Phases 2–6 | |
-| 6 | Phase 8 — validation | Phase 7 | Gate before analysis |
-| 7 | Phases 9 + 10 — EDA and analysis | Phase 8 | |
-| 8 | Phase 11 — deliverables | All | |
+| 1 | Phase 1 — **start collecting** | API key | Code ready; run it the day the key lands |
+| 2 | Phase 1.3 — settle the arrival source | 1 day of data | Decides whether Phase 2 is hard or easy |
+| 3 | Phase 3 — GTFS parsing | GTFS zip only | Can start now; structure already mapped |
+| 4 | Phase 4.1 — above/underground | nothing | Manual; start any time |
+| 5 | Phase 2 — arrival reconstruction | Phase 1.3 outcome | Longest and riskiest |
+| 6 | Phases 5 + 6 — weather and incidents | Phase 2 output | Parallelizable |
+| 7 | Phase 7 — analytical dataset | Phases 2–6 | |
+| 8 | Phase 8 — validation | Phase 7 | Gate before analysis |
+| 9 | Phases 9 + 10 — EDA and analysis | Phase 8 | |
+| 10 | Phase 11 — deliverables | All | |
 
 Good parallel split across three people: one owns collection infrastructure (Phase 1),
-one owns GTFS and the crosswalk (Phases 3–4), one owns reconstruction (Phase 2). The
-phases converge at Phase 7.
+one owns GTFS parsing and the crosswalk (Phases 3–4), one owns reconstruction (Phase 2).
+The phases converge at Phase 7.
 
 ---
 
@@ -434,12 +508,13 @@ Carried from the proposal, updated with current status and mitigation.
 
 | Risk | Status | Mitigation |
 |---|---|---|
-| Collection not yet automated — data lost permanently | **Open, urgent** | Phase 1.1, today |
-| Arrival reconstruction proves unreliable | **Open, high** | Phase 1.3 (`TrainPositions`), careful Phase 2 validation |
-| Rate limits / key expiry | Monitored | Stay well inside quota; log failures (Phase 1.2) |
+| Collection not yet running — data lost permanently | **Open, urgent** | Code is ready; blocked only on the API key. Start the day it arrives |
+| Arrival reconstruction proves unreliable | **Open, high** | GTFS-RT may remove the problem entirely (Phase 1.3); careful Phase 2 validation either way |
+| **No testable snow in the collection window** | **Confirmed** | Climatology measured (Phase 9): median 4 snow hours. Reframe around rain/wind/freezing and state the limitation |
+| Rate limits / key expiry | Mitigated | ~7,500 of 50,000 daily calls; retries skip non-transient errors; failures logged |
 | Missed snapshots between arrivals | Expected | 60s cadence; flag gap-spanning headways (Phase 2.1) |
-| Timestamp / identifier misalignment | **Open** | Phase 4 crosswalk with hard validation; UTC throughout, DST-safe conversion |
-| Weather granularity — one point for the system | **Open** | Phase 5: more sample points and/or archive backfill |
+| Timestamp / identifier misalignment | **Partly closed** | Crosswalk built and validated (Phase 4); `Group` ↔ direction still unverified; UTC throughout, DST-safe conversion still to do |
+| Weather granularity — one point for the system | **Closed** | Archive API confirmed: any coordinates, any past date, free (Phase 5) |
 | Confounding non-weather incidents | **Open** | Phase 6 controls, separating weather-caused incidents |
-| Collection window may contain no severe weather | **Open, underrated** | Audit early (Phase 9); fall back to rain/heat/wind if snow never appears |
-| Raw data volume outgrowing CSV | **Open** | Phase 1.4 partitioning / Parquet |
+| Raw data volume | **Partly closed** | Daily partitioning and gzipped protobuf in place; measure actual growth after day one |
+| Crosswalk built from a stale 2024 feed | **Open** | Re-run `build_crosswalk.py` on the live feed and diff (Phase 4) |

@@ -3,13 +3,17 @@
 import sys
 
 import collect_gtfs
+import collect_gtfs_rt
 import collect_incidents
+import collect_train_positions
 import collect_weather
 import collect_wmata
 from common import setup_logging
 
 COLLECTORS = [
     ("predictions", collect_wmata.main),
+    ("gtfs_rt", collect_gtfs_rt.main),
+    ("train_positions", collect_train_positions.main),
     ("gtfs", collect_gtfs.main),
     ("incidents", collect_incidents.main),
     ("weather", collect_weather.main),
