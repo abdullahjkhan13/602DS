@@ -21,14 +21,17 @@ snapshots. That is why collection runs on a schedule and appends to the raw file
 ```
 602DS/
 ├── src/
-│   ├── main.py               # runs all four collectors in sequence
-│   ├── collect_wmata.py      # real-time train predictions  -> data/raw/wmata_predictions.csv
-│   ├── collect_incidents.py  # rail incidents / alerts      -> data/raw/wmata_incidents.csv
-│   ├── collect_weather.py    # current weather (Open-Meteo) -> data/raw/weather.csv
-│   └── collect_gtfs.py       # static GTFS schedule feed    -> data/raw/wmata_gtfs.zip
+│   ├── main.py               # runs all four collectors once
+│   ├── common.py             # shared config, logging, retry, CSV append
+│   ├── collect_wmata.py      # real-time train predictions  -> wmata_predictions_<date>.csv
+│   ├── collect_incidents.py  # rail incidents / alerts      -> wmata_incidents_<date>.csv
+│   ├── collect_weather.py    # current weather (Open-Meteo) -> weather_<date>.csv
+│   ├── collect_gtfs.py       # static GTFS schedule feed    -> wmata_gtfs_<date>.zip
+│   └── check_train_positions.py   # one-off API probe (see ROADMAP Phase 1.3)
 ├── data/
 │   ├── raw/                  # append-only snapshots (contents git-ignored)
 │   └── processed/            # derived tables (contents git-ignored)
+├── logs/                     # collector logs (git-ignored, created on first run)
 └── requirements.txt
 ```
 
@@ -61,25 +64,29 @@ WMATA_API_KEY=your_key_here
 
 ## Usage
 
-Run all four collectors:
+Run all four collectors once:
 
 ```bash
 python src/main.py
 ```
 
-Or run one at a time:
+Or run one at a time — this is what the scheduler does, since the sources need
+different cadences:
 
 ```bash
 python src/collect_wmata.py
 ```
 
-The three CSV collectors **append**, writing a header only on first run, so each
-invocation adds one snapshot to the growing time series. `collect_gtfs.py` **overwrites**
-`wmata_gtfs.zip` — the static schedule only needs refreshing when WMATA publishes a new
-feed version.
+Each collector failure is isolated: one source going down does not stop the others.
+Output goes to `logs/<collector>.log` as well as the console, since stdout is lost
+under a scheduler.
 
-To build a usable dataset, `src/main.py` needs to run on a schedule (every 1–2 minutes
-during collection windows; see *Scheduling* below).
+The three CSV collectors **append to a per-day file** (`weather_2026-10-20.csv`),
+writing a header only when the day's file is created, so no single file grows unbounded.
+`collect_gtfs.py` writes a dated zip per download, because an arrival has to be compared
+against the schedule in force on *that* day.
+
+To build a usable dataset these must run on a schedule — see *Scheduling* below.
 
 ---
 
@@ -193,20 +200,63 @@ Full plan, phase by phase, in [ROADMAP.md](ROADMAP.md). Summary:
 
 ### Known gaps in the current code
 - No `.env.example`.
-- No retry or backoff. A single failed request raises and aborts the whole run,
-  including the collectors that would have succeeded after it.
-- No deduplication. Re-running within the same prediction cycle appends near-duplicate
-  rows; dedup is deferred to processing.
-- No logging — the collectors print to stdout, which is lost under a scheduler.
+- No deduplication. Sampling faster than a source updates appends near-duplicate rows —
+  weather especially, where the Open-Meteo `time` field repeats while `snapshot_ts`
+  advances. Dedup is deferred to processing, and must key on the source's own timestamp
+  rather than `snapshot_ts`.
 - No tests.
 
 ## Scheduling
 
-Not yet configured. Prediction data is only useful at high cadence (roughly every 1–2
-minutes), since the countdown reconstruction depends on seeing trains step down through
-`Min` values. Weather and incidents can be sampled less often. Options under
-consideration: `cron` (macOS/Linux), Task Scheduler (Windows), or a GitHub Actions
-workflow on a schedule.
+Each source is scheduled separately, because they need different cadences:
+
+| Collector | Cadence | Why |
+|---|---|---|
+| `collect_wmata.py` | 1 min | Arrival reconstruction needs to see `Min` count down |
+| `collect_incidents.py` | 5 min | Incidents last minutes to hours |
+| `collect_weather.py` | 15 min | Open-Meteo refreshes about this often |
+| `collect_gtfs.py` | weekly | Static schedule changes rarely |
+
+At these rates the WMATA calls total roughly 1,700/day, well inside the free tier's
+50,000/day.
+
+### Windows (Task Scheduler)
+
+Use a virtual environment rather than a Microsoft Store Python — the
+`WindowsApps` interpreter aliases are unreliable when launched by Task Scheduler.
+Point the tasks at `.venv\Scripts\pythonw.exe` (not `python.exe`), which runs without
+opening a console window every minute.
+
+```powershell
+$py   = "$PWD\.venv\Scripts\pythonw.exe"
+$src  = "$PWD\src"
+
+schtasks /create /tn "WMATA Predictions" /tr "`"$py`" `"$src\collect_wmata.py`""    /sc minute /mo 1  /f
+schtasks /create /tn "WMATA Incidents"   /tr "`"$py`" `"$src\collect_incidents.py`"" /sc minute /mo 5  /f
+schtasks /create /tn "WMATA Weather"     /tr "`"$py`" `"$src\collect_weather.py`""   /sc minute /mo 15 /f
+schtasks /create /tn "WMATA GTFS"        /tr "`"$py`" `"$src\collect_gtfs.py`""      /sc weekly        /f
+```
+
+Task Scheduler skips a run if the previous one is still going, so overlapping appends
+cannot corrupt a file. It does **not** catch up on runs missed while the machine is
+asleep — disable sleep on the collecting machine, or accept the gaps and flag them
+during validation.
+
+### macOS / Linux (cron)
+
+```cron
+* * * * *    cd /path/to/602DS && .venv/bin/python src/collect_wmata.py
+*/5 * * * *  cd /path/to/602DS && .venv/bin/python src/collect_incidents.py
+*/15 * * * * cd /path/to/602DS && .venv/bin/python src/collect_weather.py
+0 4 * * 0    cd /path/to/602DS && .venv/bin/python src/collect_gtfs.py
+```
+
+### Verifying it runs
+
+```bash
+tail -f logs/wmata_predictions.log     # should gain a line each minute
+ls -la data/raw/                       # files should be growing
+```
 
 ## Risks
 

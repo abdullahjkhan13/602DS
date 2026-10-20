@@ -1,32 +1,26 @@
-
-import requests
 import pandas as pd
-from pathlib import Path
-from dotenv import dotenv_values
+
+from common import append_snapshot, fetch, get_api_key, setup_logging
+
+NAME = "wmata_incidents"
+URL = "https://api.wmata.com/Incidents.svc/json/Incidents"
 
 
 def main():
-    root = Path(__file__).parent.parent
-    api_key = dotenv_values(root / ".env")["WMATA_API_KEY"]
+    logger = setup_logging(NAME)
 
-    url = "https://api.wmata.com/Incidents.svc/json/Incidents"
-
-    response = requests.get(url, headers={"api_key": api_key}, timeout=60)
-    response.raise_for_status()
-
+    response = fetch(URL, logger, headers={"api_key": get_api_key()})
     df = pd.DataFrame(response.json()["Incidents"])
 
     if df.empty:
-        print("No incidents found.")
+        logger.info("no active incidents")
         return
 
-    df["snapshot_ts"] = pd.Timestamp.now(tz="UTC")
+    snapshot_ts = pd.Timestamp.now(tz="UTC")
+    df["snapshot_ts"] = snapshot_ts
 
-    path = root / "data/raw/wmata_incidents.csv"
-
-    df.to_csv(path, mode="a", header=not path.exists(), index=False)
-
-    print("Downloaded:", len(df), "incidents")
+    path = append_snapshot(df, NAME, snapshot_ts)
+    logger.info("wrote %d incidents to %s", len(df), path.name)
 
 
 if __name__ == "__main__":

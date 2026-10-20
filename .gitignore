@@ -7,3 +7,6 @@ __pycache__/
 data/raw/*.csv
 data/raw/*.zip
 data/processed/*.csv
+data/processed/*.parquet
+
+logs/

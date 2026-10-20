@@ -1,21 +1,23 @@
-import requests
-from pathlib import Path
-from dotenv import dotenv_values
+import pandas as pd
+
+from common import RAW_DIR, fetch, get_api_key, setup_logging
+
+NAME = "wmata_gtfs"
+URL = "https://api.wmata.com/gtfs/rail-gtfs-static.zip"
 
 
 def main():
-    root = Path(__file__).parent.parent
-    api_key = dotenv_values(root / ".env")["WMATA_API_KEY"]
+    logger = setup_logging(NAME)
 
-    url = "https://api.wmata.com/gtfs/rail-gtfs-static.zip"
+    response = fetch(URL, logger, headers={"api_key": get_api_key()})
 
-    response = requests.get(url, headers={"api_key": api_key}, timeout=60)
-    response.raise_for_status()
-
-    path = root / "data/raw/wmata_gtfs.zip"
+    # Dated filename: an arrival must be compared against the schedule in force that
+    # day, so superseded feeds have to be kept rather than overwritten.
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    path = RAW_DIR / f"{NAME}_{pd.Timestamp.now(tz='UTC'):%Y-%m-%d}.zip"
     path.write_bytes(response.content)
 
-    print("GTFS downloaded successfully.")
+    logger.info("wrote %d bytes to %s", len(response.content), path.name)
 
 
 if __name__ == "__main__":
